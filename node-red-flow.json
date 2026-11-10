@@ -1,0 +1,177 @@
+[
+  {
+    "id": "smartcam-tab",
+    "type": "tab",
+    "label": "Cảnh báo camera an ninh",
+    "disabled": false,
+    "info": ""
+  },
+  {
+    "id": "smartcam-mqtt-in",
+    "type": "mqtt in",
+    "z": "smartcam-tab",
+    "name": "Cảnh báo camera đã mã hóa",
+    "topic": "smartcam/+/alerts",
+    "qos": "0",
+    "datatype": "auto",
+    "broker": "smartcam-hivemq",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 180,
+    "y": 120,
+    "wires": [
+      [
+        "smartcam-decrypt"
+      ]
+    ]
+  },
+  {
+    "id": "smartcam-decrypt",
+    "type": "function",
+    "z": "smartcam-tab",
+    "name": "Xác thực và giải mã cảnh báo",
+    "func": "try {\n    const keyHex = env.get(\"SMARTCAM_AES_KEY\") || \"\";\n    if (!/^[0-9a-fA-F]{64}$/.test(keyHex)) {\n        throw new Error(\"Hãy đặt SMARTCAM_AES_KEY trùng với khóa hex 64 ký tự đang dùng trên camera.\");\n    }\n\n    const envelope = Buffer.isBuffer(msg.payload)\n        ? JSON.parse(msg.payload.toString(\"utf8\"))\n        : (typeof msg.payload === \"string\" ? JSON.parse(msg.payload) : msg.payload);\n    if (!envelope || envelope.algorithm !== \"AES-256-GCM\" || envelope.version !== 1) {\n        throw new Error(\"Gói cảnh báo mã hóa không hợp lệ hoặc không được hỗ trợ.\");\n    }\n\n    const decipher = crypto.createDecipheriv(\n        \"aes-256-gcm\",\n        Buffer.from(keyHex, \"hex\"),\n        Buffer.from(envelope.iv, \"base64\")\n    );\n    decipher.setAuthTag(Buffer.from(envelope.tag, \"base64\"));\n    const plaintext = Buffer.concat([\n        decipher.update(Buffer.from(envelope.ciphertext, \"base64\")),\n        decipher.final()\n    ]).toString(\"utf8\");\n    const alert = JSON.parse(plaintext);\n    if (!alert.image_base64 || alert.image_mime !== \"image/jpeg\") {\n        throw new Error(\"Cảnh báo không có ảnh JPEG.\");\n    }\n\n    alert.imageUrl = \"data:\" + alert.image_mime + \";base64,\" + alert.image_base64;\n    alert.displayTimestamp = alert.timestamp || (\"Chưa đồng bộ giờ mạng (thời gian hoạt động \" + (alert.uptime_ms || 0) + \" ms)\");\n    const history = flow.get(\"smartcamHistory\") || [];\n    history.unshift(alert);\n    history.length = Math.min(history.length, 10);\n    flow.set(\"smartcamHistory\", history);\n\n    return [\n        { payload: history },\n        { payload: { label: alert.label, confidence: alert.confidence, timestamp: alert.displayTimestamp } }\n    ];\n} catch (error) {\n    node.error(\"Từ chối cảnh báo camera: \" + error.message, msg);\n    return [null, { payload: \"Cảnh báo bị từ chối: \" + error.message }];\n}",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [
+      {
+        "var": "crypto",
+        "module": "crypto"
+      }
+    ],
+    "x": 440,
+    "y": 120,
+    "wires": [
+      [
+        "smartcam-dashboard"
+      ],
+      [
+        "smartcam-debug"
+      ]
+    ]
+  },
+  {
+    "id": "smartcam-live-camera",
+    "type": "ui_template",
+    "z": "smartcam-tab",
+    "group": "smartcam-group",
+    "name": "Xem camera trực tiếp",
+    "order": 1,
+    "width": "12",
+    "height": "8",
+    "format": "<div ng-init=\"cameraUrl = cameraUrl || ''\">\n  <h3>Xem camera trực tiếp</h3>\n  <p>Nhập địa chỉ IP hiển thị trong Serial Monitor, ví dụ: http://192.168.1.25</p>\n  <input type=\"text\" ng-model=\"cameraUrl\" placeholder=\"http://192.168.1.25\" aria-label=\"Địa chỉ camera\" style=\"box-sizing:border-box;width:100%;max-width:420px;padding:10px;margin-bottom:12px;\" />\n  <div ng-if=\"cameraUrl\">\n    <img ng-src=\"{{cameraUrl}}/stream\" alt=\"Luồng camera trực tiếp\" style=\"display:block;width:100%;height:auto;background:#222;border-radius:8px;\" />\n  </div>\n  <p ng-if=\"!cameraUrl\">Camera phải bật và thiết bị xem phải cùng mạng Wi-Fi.</p>\n</div>",
+    "storeOutMessages": false,
+    "fwdInMessages": false,
+    "resendOnRefresh": false,
+    "templateScope": "local",
+    "className": "",
+    "x": 720,
+    "y": 40,
+    "wires": [
+      []
+    ]
+  },
+  {
+    "id": "smartcam-dashboard",
+    "type": "ui_template",
+    "z": "smartcam-tab",
+    "group": "smartcam-group",
+    "name": "Ảnh và trạng thái cảnh báo",
+    "order": 2,
+    "width": "12",
+    "height": "12",
+    "format": "<h3>Cảnh báo camera theo chu kỳ</h3>\n<div>Camera thức dậy định kỳ, chụp một ảnh rồi chuyển sang chế độ ngủ sâu. Không có video trực tiếp khi thiết bị đang ngủ.</div>\n<div ng-if=\"!msg.payload || !msg.payload.length\">Đang chờ cảnh báo hợp lệ từ camera...</div>\n<div ng-repeat=\"event in msg.payload track by $index\" style=\"border-bottom:1px solid #ccc;padding:12px 0;\">\n  <div><b>{{event.label}}</b> — độ tin cậy {{event.confidence | number:2}}</div>\n  <div>Thời gian: {{event.displayTimestamp}}</div>\n  <div>Pin: {{event.battery_percent === null || event.battery_percent === undefined ? 'Không có dữ liệu (dùng nguồn USB)' : event.battery_percent + '%'}}</div>\n  <img ng-src=\"{{event.imageUrl}}\" alt=\"Ảnh cảnh báo từ camera\" style=\"max-width:100%;height:auto;margin-top:8px;\" />\n</div>",
+    "storeOutMessages": true,
+    "fwdInMessages": true,
+    "resendOnRefresh": true,
+    "templateScope": "local",
+    "className": "",
+    "x": 720,
+    "y": 80,
+    "wires": [
+      []
+    ]
+  },
+  {
+    "id": "smartcam-debug",
+    "type": "debug",
+    "z": "smartcam-tab",
+    "name": "Trạng thái cảnh báo camera",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 730,
+    "y": 160,
+    "wires": []
+  },
+  {
+    "id": "smartcam-hivemq",
+    "type": "mqtt-broker",
+    "name": "HiveMQ MQTT TLS công cộng",
+    "broker": "broker.hivemq.com",
+    "port": "8883",
+    "clientid": "",
+    "autoConnect": true,
+    "usetls": true,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthPayload": "",
+    "closeTopic": "",
+    "closeQos": "0",
+    "closePayload": "",
+    "willTopic": "",
+    "willQos": "0",
+    "willPayload": "",
+    "userProps": "",
+    "sessionExpiry": "",
+    "tls": "smartcam-hivemq-tls"
+  },
+  {
+    "id": "smartcam-hivemq-tls",
+    "type": "tls-config",
+    "name": "Xác minh chứng chỉ TLS HiveMQ",
+    "cert": "",
+    "key": "",
+    "ca": "",
+    "certname": "",
+    "keyname": "",
+    "caname": "",
+    "servername": "broker.hivemq.com",
+    "verifyservercert": true,
+    "alpnprotocol": ""
+  },
+  {
+    "id": "smartcam-ui-tab",
+    "type": "ui_tab",
+    "name": "Camera an ninh",
+    "icon": "camera_alt",
+    "order": 1,
+    "disabled": false,
+    "hidden": false
+  },
+  {
+    "id": "smartcam-group",
+    "type": "ui_group",
+    "name": "Cảnh báo an ninh",
+    "tab": "smartcam-ui-tab",
+    "order": 1,
+    "disp": true,
+    "width": "12",
+    "collapse": false,
+    "className": ""
+  }
+]
